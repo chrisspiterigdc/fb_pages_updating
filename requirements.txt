@@ -1,2 +1,2 @@
-anthropic>=0.25.0
-slack-sdk>=3.27.0
+# No external dependencies required.
+# Claude handles all API calls via MCP connectors when running as a routine.
