@@ -35,7 +35,7 @@ OFFER_PARAGRAPH_EXAMPLE = """
 Today's Best Free Bet Offer
 The Tote has been at the heart of British racing for over 90 years, and today new customers can take advantage of a cracking welcome deal: Bet £10 and Get £40 in Free Bets.
 
-To qualify, register a new account, deposit and place a £10 qualifying bet at minimum odds of 1/1 (2.0). Use code B10G40 on registration. £20 in Tote Credit, a £10 Free Sports Bet and two £5 Football Acca tokens will be credited within 48 hours of your qualifying bet settling.
+To qualify, register a new account, deposit and place a £10 qualifying bet at minimum odds of 1/1. Use code B10G40 on registration. £20 in Tote Credit, a £10 Free Sports Bet and two £5 Football Acca tokens will be credited within 48 hours of your qualifying bet settling.
 
 The free bets can be used across racing, football and other sport and with the tote's unique pool betting markets, there's always the chance of a bigger return when the pools are running hot.
 
@@ -109,7 +109,7 @@ def print_daily_offer_task(date_str: str) -> None:
     print("STYLE GUIDE:")
     print("- Open with the bookmaker name and a brief brand/context line (one sentence).")
     print("- State the offer headline clearly in the first paragraph.")
-    print("- Second paragraph: qualifying terms — min bet, min odds, promo code if any, how/when credit lands.")
+    print("- Second paragraph: qualifying terms — min bet, min odds (fractional only, no decimal equivalent), promo code if any, how/when credit lands.")
     print("- Third paragraph: what the free bets cover and any standout product feature.")
     print("- Fourth/fifth paragraph: today's sports context — 1-2 specific events, times, why they're relevant to the offer.")
     print("- Close with one sentence tying the offer back to today's action.")
