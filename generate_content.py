@@ -14,6 +14,8 @@ Required env vars:
 
 import os
 import sys
+import json
+import time
 from datetime import datetime
 import anthropic
 from slack_sdk import WebClient
@@ -21,33 +23,62 @@ from slack_sdk.errors import SlackApiError
 
 SLACK_CHANNEL = "C0BATCW8K46"
 
-# Map each weekday to a content task.
-# Add new days/pages here as you expand.
+SLOT_REVIEW_COUNT = 7
+
 CONTENT_SCHEDULE = {
-    "tuesday": {
-        "page": "Slots Bonuses",
-        "url_slug": "/slots-bonuses/",
-        "description": (
-            "A page on freebets.com that lists and reviews the best slots bonuses "
-            "available to UK players, including free spins, deposit match bonuses, "
-            "and no-deposit slots offers from top UK-licensed casinos."
-        ),
-        "target_keywords": [
-            "slots bonuses",
-            "slots bonus UK",
-            "free spins bonus",
-            "best slots bonuses",
-            "online slots offers",
-        ],
-    },
-    # Example — uncomment and fill in to add more days:
+    "tuesday": {"type": "slot_reviews"},
+    # Add more days here, e.g.:
     # "wednesday": {
+    #     "type": "seo_page",
     #     "page": "Casino Welcome Bonuses",
     #     "url_slug": "/casino-welcome-bonuses/",
     #     "description": "...",
     #     "target_keywords": [...],
     # },
 }
+
+SLOT_CONTENT_TEMPLATE = """You are writing technical slot game descriptions for the page freebets.com/slots-bonuses/, in a section called "Where to Spend Your Slots Welcome Bonus?"
+
+Each entry follows this exact format — match it precisely:
+
+<h3>[Game Name]: [Developer] (Released [Month Year])</h3>
+
+[One sentence: volatility, developer, theme, and the two or three core mechanics that define the game.]
+
+[Stat block sentence: grid, ways/paylines, RTP, volatility label, max win, bet range.]
+
+[Mechanic paragraph(s): explain each core mechanic in plain language. Be specific about how they interact. Use numbers wherever possible.]
+
+[Trigger paragraph: how the bonus/free spins are triggered, how many spins, any retrigger rules.]
+
+[Buy options paragraph: list each buy option with its cost in x-stake.]
+
+All features are subject to the full game rules and paytable.
+
+Rules:
+- UK English throughout
+- No em dashes (use commas, colons, or periods instead)
+- No hollow intensifiers (significantly, incredibly, essentially)
+- No passive openers ("X options are available" → "The game carries X options")
+- No AI filler phrases
+- Vary paragraph lengths — the mechanic paragraph should be the longest
+- All numbers and mechanics must be accurate
+- Responsible gambling: no guarantee of winning language
+"""
+
+HUMANIZER_SYSTEM = """You are a content editor specialised in removing AI-generated texture from slot game technical descriptions.
+
+Review the content and rewrite any passages that contain:
+- Passive voice openers (fix to active)
+- Hollow intensifiers: significantly, incredibly, essentially, various, typically
+- Contrast negations ("Rather than X, it does Y" — rewrite as direct positive statement)
+- Redundant adjective pairs (premium enhanced, fully comprehensive)
+- Uniform paragraph lengths (vary them)
+- Any em dashes (replace with comma, colon, or period)
+
+Do not change any facts, numbers, or game mechanics.
+Do not add ideas not in the original.
+Return only the corrected content with no commentary."""
 
 
 def get_day(override: str | None = None) -> str:
@@ -56,57 +87,142 @@ def get_day(override: str | None = None) -> str:
     return datetime.now().strftime("%A").lower()
 
 
-def build_prompt(task: dict) -> str:
-    keywords = ", ".join(task["target_keywords"])
-    return f"""You are an expert SEO copywriter for freebets.com, a UK-focused comparison site for betting and casino bonuses.
-
-Write SEO-optimised page copy for the following page:
-
-Page title target: {task["page"]}
-URL: https://www.freebets.com{task["url_slug"]}
-Page purpose: {task["description"]}
-Target keywords: {keywords}
-
-Please produce:
-
-1. **SEO Title** (50–60 characters, include primary keyword)
-2. **Meta Description** (140–155 characters, compelling, include primary keyword)
-3. **H1 Heading** (clear, keyword-rich)
-4. **Intro paragraph** (2–3 sentences, hooks the reader, naturally includes primary keyword)
-5. **Main body copy** (3–4 short paragraphs covering: what the bonus type is, what to look for, how freebets.com helps players find the best offers)
-6. **CTA sentence** (one line encouraging users to browse the listings)
-
-Tone: friendly, authoritative, UK English. Avoid overly promotional language. All gambling references should follow UK responsible gambling guidelines (no guarantees of winning, no targeting vulnerable groups).
-"""
-
-
-def generate_content(task: dict) -> str:
+def find_latest_slots() -> list[dict]:
+    """Use Claude with web_search to find the 7 most recent slots on BigWinBoard."""
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    message = client.messages.create(
+
+    print(f"  Searching BigWinBoard for latest {SLOT_REVIEW_COUNT} slots...")
+
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                f"Go to bigwinboard.com and find the {SLOT_REVIEW_COUNT} most recently reviewed slot games. "
+                "For each game return a JSON array with objects containing: "
+                '"name" (game title), "developer" (studio name), "url" (bigwinboard review URL). '
+                "Return only the JSON array, no other text."
+            ),
+        }
+    ]
+
+    response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1024,
-        messages=[{"role": "user", "content": build_prompt(task)}],
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 10}],
+        messages=messages,
     )
-    return message.content[0].text
+
+    # Extract the final text response
+    for block in reversed(response.content):
+        if block.type == "text":
+            text = block.text.strip()
+            # Strip markdown code fences if present
+            if text.startswith("```"):
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            try:
+                return json.loads(text.strip())
+            except json.JSONDecodeError:
+                pass
+
+    raise RuntimeError("Could not parse slot list from search response")
 
 
-def post_to_slack(content: str, task: dict, day: str) -> None:
+def research_and_write_slot(game: dict) -> str:
+    """Research a single slot game and write its content block."""
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    print(f"  Writing: {game['name']} ({game['developer']})...")
+
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                f"Research the slot game '{game['name']}' by {game['developer']} using web search. "
+                f"Find its grid, ways/paylines, RTP options, volatility, max win, bet range, "
+                f"all mechanics, free spins triggers, and feature buy options with costs. "
+                f"Then write a content block for it following the template in your system prompt exactly. "
+                f"Use the release month and year from your research."
+            ),
+        }
+    ]
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        system=SLOT_CONTENT_TEMPLATE,
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}],
+        messages=messages,
+    )
+
+    for block in reversed(response.content):
+        if block.type == "text":
+            return block.text.strip()
+
+    raise RuntimeError(f"No text response for {game['name']}")
+
+
+def humanize(content: str) -> str:
+    """Run a humanizer pass to strip AI texture."""
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        system=HUMANIZER_SYSTEM,
+        messages=[{"role": "user", "content": content}],
+    )
+    return response.content[0].text.strip()
+
+
+def generate_slot_reviews() -> str:
+    """Find 7 latest slots, write and humanize each, return combined content."""
+    games = find_latest_slots()
+    games = games[:SLOT_REVIEW_COUNT]
+
+    blocks = []
+    for i, game in enumerate(games, 1):
+        print(f"  [{i}/{len(games)}] {game['name']}")
+        raw = research_and_write_slot(game)
+        clean = humanize(raw)
+        blocks.append(clean)
+        time.sleep(1)  # avoid rate limits
+
+    return "\n\n" + "\n\n".join(blocks)
+
+
+def post_to_slack(content: str, day: str, label: str) -> None:
     client = WebClient(token=os.environ["SLACK_BOT_TOKEN"])
     header = (
-        f":pencil: *Daily SEO Content — {day.capitalize()}*\n"
-        f"Page: *{task['page']}* (`{task['url_slug']}`)\n"
+        f":slot_machine: *Tuesday Slots Content — {SLOT_REVIEW_COUNT} New Games*\n"
+        f"Section: *Where to Spend Your Slots Welcome Bonus?*\n"
         f"{'─' * 40}\n"
     )
-    try:
-        client.chat_postMessage(
-            channel=SLACK_CHANNEL,
-            text=header + content,
-            mrkdwn=True,
-        )
-        print(f"Posted to Slack channel {SLACK_CHANNEL}")
-    except SlackApiError as e:
-        print(f"Slack error: {e.response['error']}")
-        raise
+    # Slack has a 40,000 char limit per message; split if needed
+    full = header + content
+    if len(full) > 39000:
+        chunks = [full[i : i + 39000] for i in range(0, len(full), 39000)]
+    else:
+        chunks = [full]
+
+    slack = WebClient(token=os.environ["SLACK_BOT_TOKEN"])
+    thread_ts = None
+    for chunk in chunks:
+        try:
+            resp = slack.chat_postMessage(
+                channel=SLACK_CHANNEL,
+                text=chunk,
+                mrkdwn=True,
+                thread_ts=thread_ts,
+            )
+            if thread_ts is None:
+                thread_ts = resp["ts"]
+        except SlackApiError as e:
+            print(f"Slack error: {e.response['error']}")
+            raise
+
+    print(f"Posted to Slack channel {SLACK_CHANNEL}")
 
 
 def main() -> None:
@@ -117,11 +233,13 @@ def main() -> None:
         return
 
     task = CONTENT_SCHEDULE[day]
-    print(f"Generating SEO copy for '{task['page']}' ({day.capitalize()})...")
 
-    content = generate_content(task)
-    print("Content generated. Posting to Slack...")
-    post_to_slack(content, task, day)
+    if task["type"] == "slot_reviews":
+        print(f"Tuesday: generating {SLOT_REVIEW_COUNT} slot reviews from BigWinBoard...")
+        content = generate_slot_reviews()
+        print("All reviews written. Posting to Slack...")
+        post_to_slack(content, day, "slot_reviews")
+
     print("Done.")
 
 
